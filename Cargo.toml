@@ -1,0 +1,19 @@
+[package]
+name = "wetcher"
+version = "0.1.0"
+edition = "2021"
+authors = ["Petr Portnov <me@progrm-jarvis.ru>"]
+
+[dependencies]
+teloxide = "0.12.2"
+config = "0.13.3"
+serde = { version = "1.0.188", features = ["derive"] }
+tokio = { version = "1.32.0", features = ["macros", "rt-multi-thread"] }
+color-eyre = "0.6.2"
+tracing = "0.1.37"
+tracing-subscriber = "0.3.17"
+thiserror = "1.0.48"
+reqwest = "0.11.20"
+url = { version = "2.4.1", features = ["serde"] }
+sxd-xpath = "0.4.2"
+sxd_html = "0.1.1"
