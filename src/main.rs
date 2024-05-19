@@ -1,156 +1,214 @@
-use std::time::Duration;
+mod cmd;
+mod job;
 
+use std::{borrow::Cow, path::PathBuf, process::ExitCode};
+
+use clap::Parser;
 use config::{Config, ConfigError};
-use serde::{Deserialize, Deserializer};
-use sxd_xpath::{Context, XPath};
-use teloxide::Bot;
-use tokio::{
-    select,
-    signal::{
-        ctrl_c,
-        unix::{signal, SignalKind},
-    },
-};
-use tracing::{error, info};
+use indexmap::IndexMap;
+use job::Job;
+use nodeset::Node;
+use serde::Deserialize;
+use sxd_xpath::{nodeset, Context, Value};
+use tokio::{select, signal::ctrl_c};
+use tracing::{debug, error, info, warn};
+use tracing_subscriber::EnvFilter;
 use url::Url;
+
+use crate::cmd::CmdArgs;
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
-    /// Telegram token
-    token: String,
     /// Resources to be queried
-    resources: Vec<Resource>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Resource {
-    /// URL to the resource
-    url: Url,
-    /// Period at which the resource is polled
-    period: Duration,
-    /// Targets to be queried
-    targets: Vec<Target>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Target {
-    /// Path to the targeted element
-    path: RawXPath,
+    resources: Vec<Job>,
 }
 
 /// An error which may occur while loading [config][`AppConfig`].
 #[derive(Debug, thiserror::Error)]
-#[error("failed to load configuration")]
-pub struct ConfigLoadError(#[from] ConfigError);
+pub enum ConfigLoadError {
+    #[error("path {0:?} is not a valid UTF-8 path")]
+    NonUtf8Path(PathBuf),
+    #[error(transparent)]
+    LoadError(#[from] ConfigError),
+}
 
-fn main() -> color_eyre::Result<()> {
-    color_eyre::install()?;
-    tracing_subscriber::fmt().init();
+fn main() -> ExitCode {
+    let config = cmd::CmdArgs::parse();
+
+    #[cfg(feature = "tokio-console")]
+    console_subscriber::init();
+    #[cfg(not(feature = "tokio-console"))]
+    {
+        if let Err(error) = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_env("WETCHER_LOG"))
+            .try_init()
+        {
+            error!("Failed to initialize fmt tracing subscriber: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    let config = match load_config(config) {
+        Ok(config) => {
+            info!("Loaded config: {config:?}");
+            config
+        }
+        Err(error) => {
+            error!("Failed to load configuration: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    run(config);
+    ExitCode::FAILURE
+}
+
+fn load_config(CmdArgs { config }: CmdArgs) -> Result<AppConfig, ConfigLoadError> {
+    let Some(config) = config.to_str() else {
+        return Err(ConfigLoadError::NonUtf8Path(config));
+    };
 
     let config: AppConfig = Config::builder()
         .add_source(config::Environment::with_prefix("WETCHER").separator("_"))
-        .add_source(config::File::with_name("config").required(false))
+        .add_source(config::File::with_name(config).required(false))
         .build()
-        .and_then(Config::try_deserialize)
-        .map_err(ConfigLoadError)?;
+        .and_then(Config::try_deserialize)?;
 
-    info!("Loaded config: {config:?}");
-
-    let bot = Bot::with_client(
-        config.token,
-        teloxide::net::default_reqwest_settings().build()?,
-    );
-
-    run(bot, config.resources)?;
-
-    Ok(())
-}
-
-#[derive(Debug)]
-struct RawXPath(String);
-
-impl RawXPath {
-    fn to_xpath(&self) -> XPath {
-        sxd_xpath::Factory::new()
-            .build(&self.0)
-            .expect("Path should have been parsed")
-            .expect("Path should be non-empty")
-    }
-}
-
-impl<'de> Deserialize<'de> for RawXPath {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        use serde::de::Error;
-
-        let raw = String::deserialize(deserializer)?;
-        sxd_xpath::Factory::new()
-            .build(&raw)
-            .map_err(|error| Error::custom("failed to parse XPath: {error}"))
-            .and_then(|xpath| {
-                xpath
-                    .ok_or_else(|| Error::custom("no XPath was specified"))
-                    .map(|_| Self(raw))
-            })
-    }
+    Ok(config)
 }
 
 #[tokio::main]
-async fn run(bot: Bot, resources: Vec<Resource>) -> color_eyre::Result<()> {
-    for Resource {
+async fn run(config: AppConfig) {
+    for Job {
         url,
         period,
         targets,
-    } in resources
+        continuation,
+    } in config.resources
     {
-        for Target { path } in targets {
-            let mut period = tokio::time::interval(period);
-            let url = url.clone();
-            tokio::spawn(async move {
-                loop {
-                    // TODO: pass to TG
-                    let result = handle(url.clone(), &path).await;
-                    match result {
-                        Ok(()) => {
-                            info!("Awaiting again...");
-                        }
-                        Err(e) => {
-                            error!("Failed to handle: {e}")
-                        }
+        let client = reqwest::Client::new();
+        let mut period = tokio::time::interval(period);
+        let url = url.clone();
+        tokio::spawn(async move {
+            loop {
+                period.tick().await;
+                let result = handle(&client, url.clone(), &targets, &continuation).await;
+                match result {
+                    Ok(()) => {
+                        info!("Awaiting again...");
                     }
-                    period.tick().await;
+                    Err(e) => {
+                        error!("Failed to handle: {e}")
+                    }
                 }
-            });
-        }
+            }
+        });
     }
 
-    let mut hangup_stream = signal(SignalKind::hangup())?;
-    loop {
-        select! {
-            _ = hangup_stream.recv() => {
-                info!("Reloading configuration...");
-                // TODO: reload
-            }
-            _ = ctrl_c() => {
-                break;
-            }
+    ctrl_c().await;
+    info!("Received CTRL-C signal, shutting down");
+}
+
+#[derive(Debug, thiserror::Error)]
+enum HandleError {
+    #[error("failed to execute request")]
+    Send(#[from] reqwest::Error),
+    #[error("failed to find element by XPath")]
+    XPathError(#[from] sxd_xpath::ExecutionError),
+}
+
+#[tracing::instrument]
+async fn handle(
+    client: &reqwest::Client,
+    url: Url,
+    targets: &job::Targets,
+    continuation: &job::Continuation,
+) -> Result<(), HandleError> {
+    info!("Performing request");
+    let response_body = client.get(url).send().await?.text().await?;
+    debug!("Received document body: {response_body:?}");
+    let response_body = {
+        let (response_body, html_errors) = sxd_html::parse_html_with_errors(&response_body);
+        if !html_errors.is_empty() {
+            warn!("There are HTML errors: {html_errors:?}");
+        }
+        response_body
+    };
+
+    let dom = response_body.as_document();
+
+    let context = Context::new();
+    process_targets(&context, dom.root().into(), targets);
+
+    match continuation {
+        job::Continuation::Ref(path) => {
+            let continuation = path.as_xpath().evaluate(&context, dom.root())?;
+            info!("Should continue at: {continuation:?}");
         }
     }
-    info!("Shutting down");
 
     Ok(())
 }
 
-async fn handle(url: Url, path: &RawXPath) -> color_eyre::Result<()> {
-    let response_body = reqwest::Client::new().get(url).send().await?.text().await?;
-    let response_body = sxd_html::parse_html(&response_body);
-    let dom = response_body.as_document();
+#[tracing::instrument(skip(context))]
+fn process_targets<'d>(
+    context: &'d Context,
+    node: Node<'d>,
+    targets: &'d job::Targets,
+) -> ProcessingResult<'d> {
+    ProcessingResult::Node(
+        targets
+            .0
+            .iter()
+            .filter_map(|(name, target)| {
+                let value = match target {
+                    job::Target::Single { path, then } => {
+                        let value = match path.as_xpath().evaluate(context, node) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                warn!("Failed to process: {error}");
+                                return None;
+                            }
+                        };
 
-    let context = Context::new();
-    let result = path.to_xpath().evaluate(&context, dom.root())?;
-    info!("Received: {}", result.string());
+                        if let Some(_then) = then {
+                            match value {
+                                Value::Nodeset(nodeset) => {
+                                    // FIXME:
+                                    info!("Nodes: {nodeset:?}");
+                                    // We need to go deeper.
+                                    // process_targets(context);
+                                }
+                                Value::Boolean(_) => {}
+                                Value::Number(_) => {}
+                                Value::String(_) => {}
+                            };
+                            // FIMXE
+                            ProcessingResult::Node(IndexMap::new())
+                        } else {
+                            ProcessingResult::Leaf(value)
+                        }
+                    }
+                    job::Target::Each(targets) => ProcessingResult::Node(
+                        node.children()
+                            .into_iter()
+                            .map(|child| {
+                                (
+                                    Cow::<str>::Owned(child.string_value()),
+                                    process_targets(context, child, targets),
+                                )
+                            })
+                            .collect(),
+                    ),
+                };
+                Some((Cow::Borrowed(name.as_str()), value))
+            })
+            .collect(),
+    )
+}
 
-    Ok(())
+#[derive(Debug)]
+enum ProcessingResult<'d> {
+    Node(IndexMap<Cow<'d, str>, ProcessingResult<'d>>),
+    Leaf(Value<'d>),
 }
