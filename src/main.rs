@@ -14,7 +14,7 @@ use skyscraper::{
 };
 use tokio::{fs, signal::ctrl_c};
 use tracing::{debug, error, info, span, warn, Level};
-use tracing_subscriber::EnvFilter;
+
 
 use crate::cmd::CmdArgs;
 
@@ -41,7 +41,7 @@ fn main() -> ExitCode {
     #[cfg(not(feature = "tokio-console"))]
     {
         if let Err(error) = tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::from_env("WETCHER_LOG"))
+            .with_env_filter(tracing_subscriber::EnvFilter::from_env("WETCHER_LOG"))
             .try_init()
         {
             error!("Failed to initialize fmt tracing subscriber: {error}");
