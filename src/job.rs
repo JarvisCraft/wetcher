@@ -1,9 +1,4 @@
-use std::{
-    fmt,
-    fmt::{Formatter, Write},
-    path::PathBuf,
-    time::Duration,
-};
+use std::{fmt, fmt::Formatter, path::PathBuf, time::Duration};
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer};
@@ -34,6 +29,19 @@ pub struct Job {
 pub enum Resource {
     Url(Url),
     Path(PathBuf),
+}
+
+impl fmt::Display for Resource {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Resource::Url(url) => {
+                write!(f, "Url({url})")
+            }
+            Resource::Path(path) => {
+                write!(f, "Path({})", path.display())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -120,6 +128,13 @@ impl Continuation {
 /// [`XPath`] internally stored as a [`String`].
 #[derive(Debug, Clone)]
 pub struct ParsedXPath(String);
+
+impl fmt::Display for ParsedXPath {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let Self(xpath) = self;
+        f.write_str(xpath)
+    }
+}
 
 impl ParsedXPath {
     pub fn to_xpath(&self) -> Xpath {

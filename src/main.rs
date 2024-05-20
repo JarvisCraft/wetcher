@@ -1,7 +1,7 @@
 mod cmd;
 mod job;
 
-use std::{borrow::Cow, io, path::PathBuf, process::ExitCode};
+use std::{borrow::Cow, collections::VecDeque, io, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
 use config::{Config, ConfigError};
@@ -13,13 +13,10 @@ use skyscraper::{
     xpath::{xpath_item_set::XpathItemSet, ExpressionApplyError, XpathItemTree},
 };
 use tokio::{fs, signal::ctrl_c};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, span, warn, Level};
 use tracing_subscriber::EnvFilter;
 
-use crate::{
-    cmd::CmdArgs,
-    job::{Resource, Then},
-};
+use crate::cmd::CmdArgs;
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
@@ -100,22 +97,46 @@ async fn start(config: AppConfig) -> io::Result<()> {
         continuation,
     } in config.resources
     {
+        let _span = span!(Level::INFO, "job", resource = ?&resource).entered();
         let client = reqwest::Client::new();
         let mut period = tokio::time::interval(period);
-        let resource = resource.clone();
+        let base_resource = resource.clone();
         tokio::spawn(async move {
             loop {
                 period.tick().await;
-                let result = handle(&client, resource.clone(), &targets, &continuation).await;
-                match result {
-                    Ok(continuations) => {
-                        info!("Should continue from: {continuations:?}");
-                        info!("Awaiting again...");
-                    }
-                    Err(e) => {
-                        error!("Failed to handle: {e}")
+                let mut resource_queue = VecDeque::new();
+                resource_queue.push_back(base_resource.clone());
+                while let Some(resource) = resource_queue.pop_front() {
+                    match handle(&client, resource.clone(), &targets, &continuation).await {
+                        Ok(continuations) => {
+                            info!("Found continuations: {continuations:?}");
+                            match resource {
+                                job::Resource::Url(url) => {
+                                    resource_queue.extend(continuations.into_iter().map(
+                                        |continuation| {
+                                            let mut url = url.clone();
+                                            url.set_path(
+                                                if continuation.as_bytes().first() == Some(&b'/') {
+                                                    &continuation[1..]
+                                                } else {
+                                                    &continuation
+                                                },
+                                            );
+                                            job::Resource::Url(url)
+                                        },
+                                    ));
+                                }
+                                job::Resource::Path(_) => {
+                                    warn!("Path resource does not support continuation yet");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to handle: {e}");
+                        }
                     }
                 }
+                info!("Awaiting again...");
             }
         });
     }
@@ -133,7 +154,7 @@ enum HandleError {
     Io(#[from] io::Error),
 }
 
-// #[tracing::instrument(skip(client))]
+#[tracing::instrument(skip(client), fields(resource = %resource))]
 async fn handle(
     client: &reqwest::Client,
     resource: job::Resource,
@@ -142,8 +163,8 @@ async fn handle(
 ) -> Result<Vec<String>, HandleError> {
     info!("Performing request");
     let document = match resource {
-        Resource::Url(url) => client.get(url).send().await?.text().await?,
-        Resource::Path(path) => fs::read_to_string(path).await?,
+        job::Resource::Url(url) => client.get(url).send().await?.text().await?,
+        job::Resource::Path(path) => fs::read_to_string(path).await?,
     };
     debug!("Received document body: {document:?}");
 
@@ -173,8 +194,6 @@ fn process_targets<'tree>(
             .iter()
             .enumerate()
             .map(|(id, item)| {
-                info!("Scanning: {item}");
-                info!("Item: {item:?}");
                 let group = ProcessingResult::Group(
                     targets
                         .0
@@ -184,10 +203,10 @@ fn process_targets<'tree>(
                                 Cow::Borrowed(name.as_str()),
                                 match path.to_xpath().apply_to_item(tree, item.clone()) {
                                     Ok(items) => match then {
-                                        Then::Get(next_targets) => {
+                                        job::Then::Get(next_targets) => {
                                             process_targets(tree, items, next_targets)
                                         }
-                                        Then::Extract(extractor) => {
+                                        job::Then::Extract(extractor) => {
                                             ProcessingResult::Values(extractor.extract(items))
                                         }
                                     },
