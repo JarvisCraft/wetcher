@@ -1,15 +1,15 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer};
-use sxd_xpath::XPath;
+use skyscraper::{xpath, xpath::Xpath};
 use url::Url;
 
 /// A resource which should be polled for info.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Job {
-    /// URL to the resource
-    pub url: Url,
+    /// The scraped resource
+    pub resource: Resource,
     /// Period at which the resource is polled
     pub period: Duration,
     /// Targets to be queried
@@ -19,12 +19,18 @@ pub struct Job {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub enum Resource {
+    Url(Url),
+    Path(PathBuf),
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct Targets(pub IndexMap<String, Target>);
 
 #[derive(Debug, Clone, Deserialize)]
 pub enum Target {
     Single {
-        path: RawXPath,
+        path: ParsedXPath,
         then: Option<Box<Target>>,
     },
     /// Iterate over all current children (by their IDs).
@@ -33,23 +39,20 @@ pub enum Target {
 
 #[derive(Debug, Clone, Deserialize)]
 pub enum Continuation {
-    Ref(RawXPath),
+    Ref(ParsedXPath),
 }
 
 /// [`XPath`] internally stored as a [`String`].
 #[derive(Debug, Clone)]
-pub struct RawXPath(String);
+pub struct ParsedXPath(String);
 
-impl RawXPath {
-    pub fn as_xpath(&self) -> XPath {
-        sxd_xpath::Factory::new()
-            .build(&self.0)
-            .expect("Path should have been parsed")
-            .expect("Path should be non-empty")
+impl ParsedXPath {
+    pub fn to_xpath(&self) -> Xpath {
+        xpath::parse(&self.0).expect("Path should have been parsed")
     }
 }
 
-impl<'de> Deserialize<'de> for RawXPath {
+impl<'de> Deserialize<'de> for ParsedXPath {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,

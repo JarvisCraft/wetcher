@@ -8,7 +8,7 @@ authors = ["Petr Portnov <me@progrm-jarvis.ru>"]
 config = "0.14.0"
 serde = { version = "1.0.202", features = ["derive"] }
 clap = { version = "4.5", features = ["derive"] }
-tokio = { version = "1.37", features = ["signal", "macros", "rt-multi-thread"] }
+tokio = { version = "1.37", features = ["signal", "macros", "rt-multi-thread", "fs"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 thiserror = "1.0.61"
@@ -17,8 +17,10 @@ url = { version = "2.5", features = ["serde"] }
 sxd-xpath = "0.4.2"
 sxd_html = "0.1.1"
 indexmap = { version = "2.2.6", features = ["serde"] }
+skyscraper = "0.6.3"
 
 console-subscriber = { version = "0.2.0", optional = true }
+log = "0.4.21"
 
 [features]
 tokio-console = ["dep:console-subscriber"]

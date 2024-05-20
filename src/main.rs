@@ -1,21 +1,28 @@
 mod cmd;
 mod job;
 
-use std::{borrow::Cow, path::PathBuf, process::ExitCode};
+use std::{borrow::Cow, fs::File, io, io::Write, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
 use config::{Config, ConfigError};
 use indexmap::IndexMap;
 use job::Job;
-use nodeset::Node;
 use serde::Deserialize;
-use sxd_xpath::{nodeset, Context, Value};
-use tokio::{select, signal::ctrl_c};
+use skyscraper::{
+    html,
+    xpath::{
+        grammar::{data_model::XpathItem, NonTreeXpathNode},
+        xpath_item_set::XpathItemSet,
+        ExpressionApplyError, XpathItemTree,
+    },
+};
+use thiserror::__private::AsDisplay;
+use tokio::{fs, signal::ctrl_c};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
-use crate::cmd::CmdArgs;
+use crate::{cmd::CmdArgs, job::Resource};
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
@@ -59,8 +66,18 @@ fn main() -> ExitCode {
         }
     };
 
-    run(config);
-    ExitCode::FAILURE
+    info!("Running app..");
+
+    match start(config) {
+        Ok(()) => {
+            info!("Received CTRL-C signal, shutting down");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            error!("Failed to await for CTRL-C signal: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn load_config(CmdArgs { config }: CmdArgs) -> Result<AppConfig, ConfigLoadError> {
@@ -78,9 +95,9 @@ fn load_config(CmdArgs { config }: CmdArgs) -> Result<AppConfig, ConfigLoadError
 }
 
 #[tokio::main]
-async fn run(config: AppConfig) {
+async fn start(config: AppConfig) -> io::Result<()> {
     for Job {
-        url,
+        resource,
         period,
         targets,
         continuation,
@@ -88,11 +105,11 @@ async fn run(config: AppConfig) {
     {
         let client = reqwest::Client::new();
         let mut period = tokio::time::interval(period);
-        let url = url.clone();
+        let resource = resource.clone();
         tokio::spawn(async move {
             loop {
                 period.tick().await;
-                let result = handle(&client, url.clone(), &targets, &continuation).await;
+                let result = handle(&client, resource.clone(), &targets, &continuation).await;
                 match result {
                     Ok(()) => {
                         info!("Awaiting again...");
@@ -105,57 +122,91 @@ async fn run(config: AppConfig) {
         });
     }
 
-    ctrl_c().await;
-    info!("Received CTRL-C signal, shutting down");
+    ctrl_c().await
 }
 
 #[derive(Debug, thiserror::Error)]
 enum HandleError {
     #[error("failed to execute request")]
     Send(#[from] reqwest::Error),
-    #[error("failed to find element by XPath")]
-    XPathError(#[from] sxd_xpath::ExecutionError),
+    #[error(transparent)]
+    InvalidHtml(#[from] html::parse::ParseError),
+    #[error(transparent)]
+    Io(#[from] io::Error),
 }
 
 #[tracing::instrument]
 async fn handle(
     client: &reqwest::Client,
-    url: Url,
+    resource: job::Resource,
     targets: &job::Targets,
     continuation: &job::Continuation,
 ) -> Result<(), HandleError> {
     info!("Performing request");
-    let response_body = client.get(url).send().await?.text().await?;
-    debug!("Received document body: {response_body:?}");
-    let response_body = {
-        let (response_body, html_errors) = sxd_html::parse_html_with_errors(&response_body);
-        if !html_errors.is_empty() {
-            warn!("There are HTML errors: {html_errors:?}");
-        }
-        response_body
+    let document = match resource {
+        Resource::Url(url) => client.get(url).send().await?.text().await?,
+        Resource::Path(path) => fs::read_to_string(path).await?,
     };
+    debug!("Received document body: {document:?}");
 
-    let dom = response_body.as_document();
+    let document = html::parse(&document)?;
 
-    let context = Context::new();
-    process_targets(&context, dom.root().into(), targets);
+    let tree = XpathItemTree::from(&document);
+    let result = process_targets(
+        &tree,
+        skyscraper::xpath::parse("//")
+            .unwrap()
+            .apply(&tree)
+            .unwrap()[0]
+            .clone(),
+        targets,
+    );
+    info!("Found: {result:#?}");
 
     match continuation {
-        job::Continuation::Ref(path) => {
-            let continuation = path.as_xpath().evaluate(&context, dom.root())?;
-            info!("Should continue at: {continuation:?}");
-        }
+        job::Continuation::Ref(path) => match path.to_xpath().apply(&tree) {
+            Ok(element) => match element.iter().next() {
+                Some(item) => {
+                    info!("item: !!!{item}!!!");
+                    match item.as_node() {
+                        Ok(node) => match node.as_non_tree_node() {
+                            Ok(node) => match node.as_attribute_node() {
+                                Ok(attribute) => {
+                                    info!("Should continue from: {:?}", attribute.as_display());
+                                }
+                                Err(error) => {
+                                    error!("Continuation item is not an attribute node: {error}");
+                                }
+                            },
+                            Err(error) => {
+                                error!("Continuation item is not a tree node: {error}");
+                            }
+                        },
+                        Err(error) => {
+                            error!("Continuation item is not a node: {error}");
+                        }
+                    }
+                }
+                None => {
+                    error!("No available continuations");
+                }
+            },
+            Err(error) => {
+                warn!("Failed to find continuation: {error}");
+            }
+        },
     }
 
     Ok(())
 }
 
-#[tracing::instrument(skip(context))]
-fn process_targets<'d>(
-    context: &'d Context,
-    node: Node<'d>,
-    targets: &'d job::Targets,
-) -> ProcessingResult<'d> {
+#[tracing::instrument(skip(tree, item))]
+fn process_targets<'tree>(
+    tree: &'tree XpathItemTree,
+    item: XpathItem<'tree>,
+    targets: &'tree job::Targets,
+) -> ProcessingResult<'tree> {
+    info!("Scanning: {item}");
     ProcessingResult::Node(
         targets
             .0
@@ -163,7 +214,7 @@ fn process_targets<'d>(
             .filter_map(|(name, target)| {
                 let value = match target {
                     job::Target::Single { path, then } => {
-                        let value = match path.as_xpath().evaluate(context, node) {
+                        let items = match path.to_xpath().apply_to_item(tree, item.clone()) {
                             Ok(value) => value,
                             Err(error) => {
                                 warn!("Failed to process: {error}");
@@ -171,35 +222,27 @@ fn process_targets<'d>(
                             }
                         };
 
+                        info!("Found: {items}");
                         if let Some(_then) = then {
-                            match value {
-                                Value::Nodeset(nodeset) => {
-                                    // FIXME:
-                                    info!("Nodes: {nodeset:?}");
-                                    // We need to go deeper.
-                                    // process_targets(context);
-                                }
-                                Value::Boolean(_) => {}
-                                Value::Number(_) => {}
-                                Value::String(_) => {}
-                            };
-                            // FIMXE
+                            // FIXME
                             ProcessingResult::Node(IndexMap::new())
                         } else {
-                            ProcessingResult::Leaf(value)
+                            // ProcessingResult::Leaf(value)
+                            ProcessingResult::Leaf(items)
                         }
                     }
-                    job::Target::Each(targets) => ProcessingResult::Node(
-                        node.children()
-                            .into_iter()
-                            .map(|child| {
-                                (
-                                    Cow::<str>::Owned(child.string_value()),
-                                    process_targets(context, child, targets),
-                                )
-                            })
-                            .collect(),
-                    ),
+                    // job::Target::Each(targets) => ProcessingResult::Node(
+                    //     item.iter()
+                    //         .map(|child| {
+                    //             (
+                    //                 Cow::Owned(child.to_string()),
+                    //                 // process_targets(child, targets),
+                    //                 ProcessingResult::Node(Default::default()),
+                    //             )
+                    //         })
+                    //         .collect(),
+                    // ),
+                    job::Target::Each(targets) => ProcessingResult::Node(Default::default()),
                 };
                 Some((Cow::Borrowed(name.as_str()), value))
             })
@@ -208,7 +251,40 @@ fn process_targets<'d>(
 }
 
 #[derive(Debug)]
-enum ProcessingResult<'d> {
-    Node(IndexMap<Cow<'d, str>, ProcessingResult<'d>>),
-    Leaf(Value<'d>),
+enum ProcessingResult<'tree> {
+    Node(IndexMap<Cow<'tree, str>, ProcessingResult<'tree>>),
+    Leaf(XpathItemSet<'tree>),
+}
+
+#[cfg(test)]
+mod tests {
+    use skyscraper::xpath;
+
+    use super::*;
+
+    fn print_items(items: &XpathItemSet<'_>) {
+        println!("{} items:", items.len());
+        for item in items {
+            println!("-> {item:?}");
+        }
+    }
+
+    #[test]
+    fn test_path() {
+        const XPATH0: &str =
+            "/html/body/div[1]/div/div[5]/div/div[2]/div[3]/div[3]/div[4]/nav/ul/li[9]/a";
+        let xpath0 = xpath::parse(XPATH0).unwrap();
+
+        let document = html::parse(&std::fs::read_to_string("./avito.html").unwrap()).unwrap();
+
+        let tree = XpathItemTree::from(&document);
+
+        let items = xpath0.apply(&tree).unwrap();
+        print_items(&items);
+
+        let xpath =
+            xpath::parse("/html/body/div[1]/div/div[6]/div/div[2]/div[3]/div[3]/div[3]/div[2]/div");
+        let items = xpath0.apply_to_item(&tree, items[0].clone()).unwrap();
+        print_items(&items);
+    }
 }

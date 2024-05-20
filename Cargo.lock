@@ -280,7 +280,7 @@ version = "4.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "528131438037fd55894f62d6e9f068b8f45ac57ffa77517819645d10aed04f64"
 dependencies = [
- "heck",
+ "heck 0.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.65",
@@ -481,6 +481,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b45de904aa0b010bce2ab45264d0631681847fa7b6f2eaa7dab7619943bc4f59"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "enum-extract-error"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42af18e5daffa0cf759908eb3d13fee16c5811044fe557c6479f5fc0bff14737"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "enum-extract-macro"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5d96b65abfa4396768e2a3089ae302e350019a7ed7db14ce54a82633c12310a"
+dependencies = [
+ "enum-extract-error",
+ "heck 0.4.1",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.65",
 ]
 
 [[package]]
@@ -689,6 +711,12 @@ dependencies = [
  "nom",
  "num-traits",
 ]
+
+[[package]]
+name = "heck"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95505c38b4572b2d910cecb0281560f54b440a19336cbbcb27bf6ce6adc6f5a8"
 
 [[package]]
 name = "heck"
@@ -912,6 +940,12 @@ dependencies = [
  "hashbrown 0.14.5",
  "serde",
 ]
+
+[[package]]
+name = "indextree"
+version = "4.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a6f7e29c1619ec492f411b021ac9f30649d5f522ca6f287f2467ee48c8dfe10"
 
 [[package]]
 name = "ipnet"
@@ -1193,6 +1227,15 @@ dependencies = [
  "libc",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "ordered-float"
+version = "4.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a76df7075c7d4d01fdcb46c912dd17fba5b60c78ea480b475f2b6ab6f666584e"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
@@ -1759,6 +1802,23 @@ name = "siphasher"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38b58827f4464d87d377d175e90bf58eb00fd8716ff0a62f80356b5e61555d0d"
+
+[[package]]
+name = "skyscraper"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9058cf22009481825a4ce2f06f5879846e1a0f8e8629a116de5a3093ccab25f8"
+dependencies = [
+ "enum-extract-error",
+ "enum-extract-macro",
+ "indexmap 2.2.6",
+ "indextree",
+ "log",
+ "nom",
+ "once_cell",
+ "ordered-float",
+ "thiserror",
+]
 
 [[package]]
 name = "slab"
@@ -2395,8 +2455,10 @@ dependencies = [
  "config",
  "console-subscriber",
  "indexmap 2.2.6",
+ "log",
  "reqwest",
  "serde",
+ "skyscraper",
  "sxd-xpath",
  "sxd_html",
  "thiserror",
