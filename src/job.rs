@@ -1,10 +1,19 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    fmt,
+    fmt::{Formatter, Write},
+    path::PathBuf,
+    time::Duration,
+};
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer};
 use skyscraper::{
     xpath,
-    xpath::{grammar::XpathItemTreeNode, xpath_item_set::XpathItemSet, Xpath},
+    xpath::{
+        grammar::{data_model::Node, NonTreeXpathNode},
+        xpath_item_set::XpathItemSet,
+        Xpath, XpathItemTree,
+    },
 };
 use url::Url;
 
@@ -71,9 +80,41 @@ pub enum Value<'tree> {
     String(&'tree str),
 }
 
+impl fmt::Display for Value<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Unknown => f.write_str("?"),
+            Value::String(value) => f.write_str(value),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub enum Continuation {
     Ref(ParsedXPath),
+}
+
+impl Continuation {
+    pub fn evaluate(&self, tree: &XpathItemTree) -> Vec<String> {
+        match self {
+            Continuation::Ref(path) => {
+                let Ok(items) = path.to_xpath().apply(tree) else {
+                    return vec![];
+                };
+
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_node()
+                            .and_then(Node::as_non_tree_node)
+                            .and_then(NonTreeXpathNode::as_attribute_node)
+                            .map(|node| node.value.clone())
+                            .ok()
+                    })
+                    .collect()
+            }
+        }
+    }
 }
 
 /// [`XPath`] internally stored as a [`String`].

@@ -12,9 +12,8 @@ use skyscraper::{
     html,
     xpath::{xpath_item_set::XpathItemSet, ExpressionApplyError, XpathItemTree},
 };
-use thiserror::__private::AsDisplay;
 use tokio::{fs, signal::ctrl_c};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::{
@@ -109,7 +108,8 @@ async fn start(config: AppConfig) -> io::Result<()> {
                 period.tick().await;
                 let result = handle(&client, resource.clone(), &targets, &continuation).await;
                 match result {
-                    Ok(()) => {
+                    Ok(continuations) => {
+                        info!("Should continue from: {continuations:?}");
                         info!("Awaiting again...");
                     }
                     Err(e) => {
@@ -139,7 +139,7 @@ async fn handle(
     resource: job::Resource,
     targets: &job::Targets,
     continuation: &job::Continuation,
-) -> Result<(), HandleError> {
+) -> Result<Vec<String>, HandleError> {
     info!("Performing request");
     let document = match resource {
         Resource::Url(url) => client.get(url).send().await?.text().await?,
@@ -160,38 +160,7 @@ async fn handle(
     );
     info!("Found: {result:#?}");
 
-    match continuation {
-        job::Continuation::Ref(path) => match path.to_xpath().apply(&tree) {
-            Ok(element) => match element.iter().next() {
-                Some(item) => match item.as_node() {
-                    Ok(node) => match node.as_non_tree_node() {
-                        Ok(node) => match node.as_attribute_node() {
-                            Ok(attribute) => {
-                                info!("Should continue from: {:?}", attribute.as_display());
-                            }
-                            Err(error) => {
-                                error!("Continuation item is not an attribute node: {error}");
-                            }
-                        },
-                        Err(error) => {
-                            error!("Continuation item is not a tree node: {error}");
-                        }
-                    },
-                    Err(error) => {
-                        error!("Continuation item is not a node: {error}");
-                    }
-                },
-                None => {
-                    error!("No available continuations");
-                }
-            },
-            Err(error) => {
-                warn!("Failed to find continuation: {error}");
-            }
-        },
-    }
-
-    Ok(())
+    Ok(continuation.evaluate(&tree))
 }
 
 fn process_targets<'tree>(
@@ -219,10 +188,10 @@ fn process_targets<'tree>(
                                             process_targets(tree, items, next_targets)
                                         }
                                         Then::Extract(extractor) => {
-                                            ProcessingResult::Leaf(extractor.extract(items))
+                                            ProcessingResult::Values(extractor.extract(items))
                                         }
                                     },
-                                    Err(error) => ProcessingResult::Unknown(error),
+                                    Err(error) => ProcessingResult::Error(error),
                                 },
                             )
                         })
@@ -234,9 +203,10 @@ fn process_targets<'tree>(
     )
 }
 
+#[allow(dead_code)] // Ony used for `Debug`.
 #[derive(Debug)]
 enum ProcessingResult<'tree> {
     Group(IndexMap<Cow<'tree, str>, ProcessingResult<'tree>>),
-    Leaf(Vec<job::Value<'tree>>),
-    Unknown(ExpressionApplyError),
+    Values(Vec<job::Value<'tree>>),
+    Error(ExpressionApplyError),
 }
