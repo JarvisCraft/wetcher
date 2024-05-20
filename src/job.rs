@@ -2,7 +2,10 @@ use std::{path::PathBuf, time::Duration};
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer};
-use skyscraper::{xpath, xpath::Xpath};
+use skyscraper::{
+    xpath,
+    xpath::{grammar::XpathItemTreeNode, xpath_item_set::XpathItemSet, Xpath},
+};
 use url::Url;
 
 /// A resource which should be polled for info.
@@ -30,7 +33,42 @@ pub struct Targets(pub IndexMap<String, Target>);
 #[derive(Debug, Clone, Deserialize)]
 pub struct Target {
     pub path: ParsedXPath,
-    pub then: Option<Targets>,
+    pub then: Then,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub enum Then {
+    Get(Targets),
+    Extract(ValueExtractor),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub enum ValueExtractor {
+    Text,
+}
+
+impl ValueExtractor {
+    pub fn extract<'tree>(&self, items: XpathItemSet<'tree>) -> Vec<Value<'tree>> {
+        use skyscraper::xpath::grammar::data_model::*;
+        match self {
+            Self::Text => items
+                .iter()
+                .map(|item| {
+                    item.as_node()
+                        .and_then(Node::as_tree_node)
+                        .and_then(|tree| tree.data.as_text_node())
+                        .map(|item| Value::String(&item.content))
+                        .unwrap_or(Value::Unknown)
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Value<'tree> {
+    Unknown,
+    String(&'tree str),
 }
 
 #[derive(Debug, Clone, Deserialize)]

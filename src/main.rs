@@ -17,7 +17,10 @@ use tokio::{fs, signal::ctrl_c};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use crate::{cmd::CmdArgs, job::Resource};
+use crate::{
+    cmd::CmdArgs,
+    job::{Resource, Then},
+};
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
@@ -211,13 +214,14 @@ fn process_targets<'tree>(
                             (
                                 Cow::Borrowed(name.as_str()),
                                 match path.to_xpath().apply_to_item(tree, item.clone()) {
-                                    Ok(items) => {
-                                        if let Some(then) = then {
-                                            process_targets(tree, items, then)
-                                        } else {
-                                            ProcessingResult::Leaf(items)
+                                    Ok(items) => match then {
+                                        Then::Get(next_targets) => {
+                                            process_targets(tree, items, next_targets)
                                         }
-                                    }
+                                        Then::Extract(extractor) => {
+                                            ProcessingResult::Leaf(extractor.extract(items))
+                                        }
+                                    },
                                     Err(error) => ProcessingResult::Unknown(error),
                                 },
                             )
@@ -233,42 +237,6 @@ fn process_targets<'tree>(
 #[derive(Debug)]
 enum ProcessingResult<'tree> {
     Group(IndexMap<Cow<'tree, str>, ProcessingResult<'tree>>),
-    Leaf(XpathItemSet<'tree>),
+    Leaf(Vec<job::Value<'tree>>),
     Unknown(ExpressionApplyError),
-}
-
-#[cfg(test)]
-mod tests {
-    use skyscraper::xpath;
-
-    use super::*;
-
-    fn print_items(items: &XpathItemSet<'_>) {
-        println!("{} items:", items.len());
-        for item in items {
-            println!("-> {item:?}");
-        }
-    }
-
-    #[test]
-    fn test_path() {
-        //                    /html/body/div[1]/div/div[5]/div/div[2]/div[3]/div[3]/div[3]/div[2]/div[3]/div/div/div[2]/div[2]/div/a/h3
-        const XPATH0: &str =
-            "//html/body/div[1]/div/div[5]/div/div[2]/div[3]/div[3]/div[3]/div[2]/div";
-        //                     /html/body/div[1]/div/div[6]/div/div[2]/div[3]/div[3]/div[3]/div[2]/div
-        let xpath0 = xpath::parse(XPATH0).unwrap();
-
-        let document = html::parse(&std::fs::read_to_string("./avito.html").unwrap()).unwrap();
-
-        let tree = XpathItemTree::from(&document);
-
-        let items = xpath0.apply(&tree).unwrap();
-        print_items(&items);
-
-        let xpath = xpath::parse("/div/div/div[2]/div[2]/div/a/h3/").unwrap();
-        for item in &items {
-            let items = xpath.apply_to_item(&tree, item.clone()).unwrap();
-            print_items(&items);
-        }
-    }
 }
