@@ -157,8 +157,7 @@ async fn handle(
         skyscraper::xpath::parse("//")
             .unwrap()
             .apply(&tree)
-            .unwrap()[0]
-            .clone(),
+            .unwrap(),
         targets,
     );
     info!("Found: {result:#?}");
@@ -200,51 +199,61 @@ async fn handle(
     Ok(())
 }
 
-#[tracing::instrument(skip(tree, item))]
+#[tracing::instrument(skip(tree, items))]
 fn process_targets<'tree>(
     tree: &'tree XpathItemTree,
-    item: XpathItem<'tree>,
+    items: XpathItemSet<'tree>,
     targets: &'tree job::Targets,
 ) -> ProcessingResult<'tree> {
-    info!("Scanning: {item}");
-    ProcessingResult::Node(
-        targets
-            .0
+    ProcessingResult::Group(
+        items
             .iter()
-            .filter_map(|(name, target)| {
-                let value = match target {
-                    job::Target::Single { path, then } => {
-                        let items = match path.to_xpath().apply_to_item(tree, item.clone()) {
-                            Ok(value) => value,
-                            Err(error) => {
-                                warn!("Failed to process: {error}");
-                                return None;
-                            }
-                        };
+            .enumerate()
+            .map(|(id, item)| {
+                info!("Scanning: {item}");
+                let group = ProcessingResult::Group(
+                    targets
+                        .0
+                        .iter()
+                        .filter_map(|(name, target)| {
+                            let value = match target {
+                                job::Target::Single { path, then } => {
+                                    let items =
+                                        match path.to_xpath().apply_to_item(tree, item.clone()) {
+                                            Ok(value) => value,
+                                            Err(error) => {
+                                                warn!("Failed to process: {error}");
+                                                return None;
+                                            }
+                                        };
 
-                        info!("Found: {items}");
-                        if let Some(_then) = then {
-                            // FIXME
-                            ProcessingResult::Node(IndexMap::new())
-                        } else {
-                            // ProcessingResult::Leaf(value)
-                            ProcessingResult::Leaf(items)
-                        }
-                    }
-                    // job::Target::Each(targets) => ProcessingResult::Node(
-                    //     item.iter()
-                    //         .map(|child| {
-                    //             (
-                    //                 Cow::Owned(child.to_string()),
-                    //                 // process_targets(child, targets),
-                    //                 ProcessingResult::Node(Default::default()),
-                    //             )
-                    //         })
-                    //         .collect(),
-                    // ),
-                    job::Target::Each(targets) => ProcessingResult::Node(Default::default()),
-                };
-                Some((Cow::Borrowed(name.as_str()), value))
+                                    info!("Found: {items}");
+                                    if let Some(then) = then {
+                                        // FIXME
+                                        ProcessingResult::Group(IndexMap::new())
+                                    } else {
+                                        // ProcessingResult::Leaf(value)
+                                        ProcessingResult::Leaf(items)
+                                    }
+                                }
+                                // job::Target::Each(targets) => ProcessingResult::Node(
+                                //     item.iter()
+                                //         .map(|child| {
+                                //             (
+                                //                 Cow::Owned(child.to_string()),
+                                //                 // process_targets(child, targets),
+                                //                 ProcessingResult::Node(Default::default()),
+                                //             )
+                                //         })
+                                //         .collect(),
+                                // ),
+                                job::Target::Each(targets) => ProcessingResult::Unknown,
+                            };
+                            Some((Cow::Borrowed(name.as_str()), value))
+                        })
+                        .collect(),
+                );
+                (Cow::Owned(format!("[{id}]")), group)
             })
             .collect(),
     )
@@ -252,8 +261,9 @@ fn process_targets<'tree>(
 
 #[derive(Debug)]
 enum ProcessingResult<'tree> {
-    Node(IndexMap<Cow<'tree, str>, ProcessingResult<'tree>>),
+    Group(IndexMap<Cow<'tree, str>, ProcessingResult<'tree>>),
     Leaf(XpathItemSet<'tree>),
+    Unknown,
 }
 
 #[cfg(test)]
