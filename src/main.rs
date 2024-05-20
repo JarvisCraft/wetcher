@@ -1,7 +1,7 @@
 mod cmd;
 mod job;
 
-use std::{borrow::Cow, fs::File, io, io::Write, path::PathBuf, process::ExitCode};
+use std::{borrow::Cow, io, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
 use config::{Config, ConfigError};
@@ -10,17 +10,12 @@ use job::Job;
 use serde::Deserialize;
 use skyscraper::{
     html,
-    xpath::{
-        grammar::{data_model::XpathItem, NonTreeXpathNode},
-        xpath_item_set::XpathItemSet,
-        ExpressionApplyError, XpathItemTree,
-    },
+    xpath::{xpath_item_set::XpathItemSet, ExpressionApplyError, XpathItemTree},
 };
 use thiserror::__private::AsDisplay;
 use tokio::{fs, signal::ctrl_c};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
-use url::Url;
 
 use crate::{cmd::CmdArgs, job::Resource};
 
@@ -135,7 +130,7 @@ enum HandleError {
     Io(#[from] io::Error),
 }
 
-#[tracing::instrument]
+// #[tracing::instrument(skip(client))]
 async fn handle(
     client: &reqwest::Client,
     resource: job::Resource,
@@ -165,27 +160,24 @@ async fn handle(
     match continuation {
         job::Continuation::Ref(path) => match path.to_xpath().apply(&tree) {
             Ok(element) => match element.iter().next() {
-                Some(item) => {
-                    info!("item: !!!{item}!!!");
-                    match item.as_node() {
-                        Ok(node) => match node.as_non_tree_node() {
-                            Ok(node) => match node.as_attribute_node() {
-                                Ok(attribute) => {
-                                    info!("Should continue from: {:?}", attribute.as_display());
-                                }
-                                Err(error) => {
-                                    error!("Continuation item is not an attribute node: {error}");
-                                }
-                            },
+                Some(item) => match item.as_node() {
+                    Ok(node) => match node.as_non_tree_node() {
+                        Ok(node) => match node.as_attribute_node() {
+                            Ok(attribute) => {
+                                info!("Should continue from: {:?}", attribute.as_display());
+                            }
                             Err(error) => {
-                                error!("Continuation item is not a tree node: {error}");
+                                error!("Continuation item is not an attribute node: {error}");
                             }
                         },
                         Err(error) => {
-                            error!("Continuation item is not a node: {error}");
+                            error!("Continuation item is not a tree node: {error}");
                         }
+                    },
+                    Err(error) => {
+                        error!("Continuation item is not a node: {error}");
                     }
-                }
+                },
                 None => {
                     error!("No available continuations");
                 }
@@ -199,7 +191,6 @@ async fn handle(
     Ok(())
 }
 
-#[tracing::instrument(skip(tree, items))]
 fn process_targets<'tree>(
     tree: &'tree XpathItemTree,
     items: XpathItemSet<'tree>,
@@ -211,45 +202,25 @@ fn process_targets<'tree>(
             .enumerate()
             .map(|(id, item)| {
                 info!("Scanning: {item}");
+                info!("Item: {item:?}");
                 let group = ProcessingResult::Group(
                     targets
                         .0
                         .iter()
-                        .filter_map(|(name, target)| {
-                            let value = match target {
-                                job::Target::Single { path, then } => {
-                                    let items =
-                                        match path.to_xpath().apply_to_item(tree, item.clone()) {
-                                            Ok(value) => value,
-                                            Err(error) => {
-                                                warn!("Failed to process: {error}");
-                                                return None;
-                                            }
-                                        };
-
-                                    info!("Found: {items}");
-                                    if let Some(then) = then {
-                                        // FIXME
-                                        ProcessingResult::Group(IndexMap::new())
-                                    } else {
-                                        // ProcessingResult::Leaf(value)
-                                        ProcessingResult::Leaf(items)
+                        .map(|(name, job::Target { path, then })| {
+                            (
+                                Cow::Borrowed(name.as_str()),
+                                match path.to_xpath().apply_to_item(tree, item.clone()) {
+                                    Ok(items) => {
+                                        if let Some(then) = then {
+                                            process_targets(tree, items, then)
+                                        } else {
+                                            ProcessingResult::Leaf(items)
+                                        }
                                     }
-                                }
-                                // job::Target::Each(targets) => ProcessingResult::Node(
-                                //     item.iter()
-                                //         .map(|child| {
-                                //             (
-                                //                 Cow::Owned(child.to_string()),
-                                //                 // process_targets(child, targets),
-                                //                 ProcessingResult::Node(Default::default()),
-                                //             )
-                                //         })
-                                //         .collect(),
-                                // ),
-                                job::Target::Each(targets) => ProcessingResult::Unknown,
-                            };
-                            Some((Cow::Borrowed(name.as_str()), value))
+                                    Err(error) => ProcessingResult::Unknown(error),
+                                },
+                            )
                         })
                         .collect(),
                 );
@@ -263,7 +234,7 @@ fn process_targets<'tree>(
 enum ProcessingResult<'tree> {
     Group(IndexMap<Cow<'tree, str>, ProcessingResult<'tree>>),
     Leaf(XpathItemSet<'tree>),
-    Unknown,
+    Unknown(ExpressionApplyError),
 }
 
 #[cfg(test)]
@@ -281,8 +252,10 @@ mod tests {
 
     #[test]
     fn test_path() {
+        //                    /html/body/div[1]/div/div[5]/div/div[2]/div[3]/div[3]/div[3]/div[2]/div[3]/div/div/div[2]/div[2]/div/a/h3
         const XPATH0: &str =
-            "/html/body/div[1]/div/div[5]/div/div[2]/div[3]/div[3]/div[4]/nav/ul/li[9]/a";
+            "//html/body/div[1]/div/div[5]/div/div[2]/div[3]/div[3]/div[3]/div[2]/div";
+        //                     /html/body/div[1]/div/div[6]/div/div[2]/div[3]/div[3]/div[3]/div[2]/div
         let xpath0 = xpath::parse(XPATH0).unwrap();
 
         let document = html::parse(&std::fs::read_to_string("./avito.html").unwrap()).unwrap();
@@ -292,9 +265,10 @@ mod tests {
         let items = xpath0.apply(&tree).unwrap();
         print_items(&items);
 
-        let xpath =
-            xpath::parse("/html/body/div[1]/div/div[6]/div/div[2]/div[3]/div[3]/div[3]/div[2]/div");
-        let items = xpath0.apply_to_item(&tree, items[0].clone()).unwrap();
-        print_items(&items);
+        let xpath = xpath::parse("/div/div/div[2]/div[2]/div/a/h3/").unwrap();
+        for item in &items {
+            let items = xpath.apply_to_item(&tree, item.clone()).unwrap();
+            print_items(&items);
+        }
     }
 }
